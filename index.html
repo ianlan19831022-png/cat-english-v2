@@ -523,7 +523,25 @@ const App = {
     const prog=await this.getProgress();
     document.getElementById('level-map').style.display='block';
     document.getElementById('learn-area').style.display='none';
-    let html=`<div class="card"><h3 style="margin-bottom:12px;">🍽️ 美食地图 · 7关</h3><div class="level-list">`;
+    const customCount=(await this.dbGetAll('sentences')).filter(s=>s.level===0&&!s.archived).length;
+    let html=`<div class="card">
+      <h3 style="margin-bottom:12px;">📝 我的句子</h3>
+      <button class="btn btn-primary btn-sm" style="width:100%;" onclick="App.toggleImport()">📥 导入文章</button>
+      <div id="import-area" style="display:none;margin-top:10px;">
+        <textarea id="import-text" placeholder="粘贴英文文章…" style="width:100%;min-height:100px;border:2px solid var(--border);border-radius:var(--radius-sm);padding:10px;font-size:14px;font-family:inherit;"></textarea>
+        <button class="btn btn-primary btn-sm" style="margin-top:8px;width:100%;" onclick="App.importArticle()">拆解句子</button>
+        <div id="import-sentences" style="margin-top:8px;"></div>
+      </div>
+      <div class="level-row" onclick="App.enterLevel(0)" style="border-style:dashed;margin-top:10px;">
+        <div class="lv-icon">📖</div>
+        <div class="lv-info"><div class="lv-title">学习我的句子</div><div class="lv-sub">${customCount>0?`当前共${customCount}句`:'当前暂无句子'}</div></div>
+        <span class="lv-badge open">🔓</span>
+      </div>
+      <button class="btn btn-outline btn-sm" style="width:100%;margin-top:10px;" onclick="App.toggleOverview()">📋 句子总览</button>
+      <div id="overview-area" style="display:none;margin-top:10px;"></div>
+    </div>`;
+
+    html+=`<div class="card" style="margin-top:12px;"><h3 style="margin-bottom:12px;">🍽️ 美食地图 · 7关</h3><div class="level-list">`;
     for(const L of LEVELS){
       const done=prog.completedLevels.includes(L.id);
       const locked=L.id>prog.currentLevel;
@@ -538,29 +556,7 @@ const App = {
         ${badge}
       </div>`;
     }
-    // Custom sentences row
-    const customCount=(await this.dbGetAll('sentences')).filter(s=>s.level===0&&!s.archived).length;
-    html+=`<div class="level-row" onclick="App.enterLevel(0)" style="border-style:dashed;">
-      <div class="lv-icon">📝</div>
-      <div class="lv-info"><div class="lv-title">自定义句子</div><div class="lv-sub">${customCount}句</div></div>
-      <span class="lv-badge open">🔓</span>
-    </div></div></div>`;
-
-    // Sentence overview card
-    html+=`<div class="card" style="margin-top:12px;">
-      <button class="btn btn-outline btn-sm" style="width:100%;" onclick="App.toggleOverview()">📋 句子总览</button>
-      <div id="overview-area" style="display:none;margin-top:10px;"></div>
-    </div>`;
-
-    // Import article card
-    html+=`<div class="card">
-      <button class="btn btn-outline btn-sm" style="width:100%;" onclick="App.toggleImport()">📥 导入文章</button>
-      <div id="import-area" style="display:none;margin-top:10px;">
-        <textarea id="import-text" placeholder="粘贴英文文章…" style="width:100%;min-height:100px;border:2px solid var(--border);border-radius:var(--radius-sm);padding:10px;font-size:14px;font-family:inherit;"></textarea>
-        <button class="btn btn-primary btn-sm" style="margin-top:8px;width:100%;" onclick="App.importArticle()">拆解句子</button>
-        <div id="import-sentences" style="margin-top:8px;"></div>
-      </div>
-    </div>`;
+    html+=`</div></div>`;
     document.getElementById('level-map').innerHTML=html;
   },
 
