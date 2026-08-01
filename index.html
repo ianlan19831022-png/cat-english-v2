@@ -112,6 +112,18 @@ nav button .icon { font-size:20px; } nav button.active { color:var(--primary); f
 .reward-popup.show { transform:translate(-50%,-50%) scale(1); }
 .reward-popup .rp-icon { font-size:64px; } .reward-popup .rp-text { font-size:16px; margin-top:8px; font-weight:600; } .reward-popup .rp-close { margin-top:14px; }
 .empty { text-align:center; padding:48px 20px; color:var(--text-secondary); } .empty .icon { font-size:48px; margin-bottom:12px; }
+.vision-actions { display:flex; gap:8px; margin-top:8px; }
+.vision-actions .btn { flex:1; }
+.vision-note { margin-top:8px; color:var(--text-secondary); font-size:12px; line-height:1.5; }
+.vision-preview { display:block; width:100%; max-height:180px; object-fit:contain; margin:10px 0; border-radius:var(--radius-sm); background:var(--bg); }
+.vision-status { padding:12px; margin-top:10px; border-radius:var(--radius-sm); background:var(--bg); color:var(--text-secondary); font-size:13px; line-height:1.5; }
+.vision-status.error { background:#fff1f1; color:var(--danger); }
+.vision-result { display:flex; align-items:flex-start; gap:8px; padding:10px 0; border-bottom:1px solid var(--border); }
+.vision-result input[type="checkbox"] { margin-top:12px; flex:0 0 auto; }
+.vision-result textarea { flex:1; min-height:64px; resize:vertical; border:1.5px solid var(--border); border-radius:8px; padding:9px; font:inherit; font-size:14px; line-height:1.45; color:var(--text); background:var(--card); user-select:text; }
+.vision-result textarea:focus { outline:none; border-color:var(--primary); }
+.vision-delete { flex:0 0 auto; width:auto; padding:7px 9px; color:var(--danger); }
+.btn:disabled { opacity:.55; cursor:not-allowed; transform:none; }
 </style>
 </head>
 <body>
@@ -346,6 +358,7 @@ const App = {
   db:null, todayStr:new Date().toISOString().split('T')[0],
   learnSentences:[], learnIndex:0, currentLevelId:1,
   quizSentences:[], quizIndex:0, quizCurrent:null,
+  visionResults:[], visionBusy:false, visionPreviewUrl:'',
 
   async init(){
     await this.openDB(); await this.seedData();
@@ -552,6 +565,14 @@ const App = {
     let html=`<div class="card">
       <h3 style="margin-bottom:12px;">📝 我的句子</h3>
       <button class="btn btn-primary btn-sm" style="width:100%;" onclick="App.toggleImport()">📥 导入文章</button>
+      <div class="vision-actions">
+        <button class="btn btn-outline btn-sm" onclick="document.getElementById('vision-camera').click()">📷 拍照导入</button>
+        <button class="btn btn-outline btn-sm" onclick="document.getElementById('vision-gallery').click()">🖼️ 相册导入</button>
+      </div>
+      <input id="vision-camera" type="file" accept="image/jpeg,image/png,image/webp" capture="environment" hidden onchange="App.handleVisionFile(this.files[0]);this.value=''">
+      <input id="vision-gallery" type="file" accept="image/jpeg,image/png,image/webp" hidden onchange="App.handleVisionFile(this.files[0]);this.value=''">
+      <div class="vision-note">图片只用于本次识别，不会保存。请先裁掉身份证、地址等敏感内容。</div>
+      <div id="vision-area" style="display:none;"></div>
       <div id="import-area" style="display:none;margin-top:10px;">
         <textarea id="import-text" placeholder="粘贴英文文章…" style="width:100%;min-height:100px;border:2px solid var(--border);border-radius:var(--radius-sm);padding:10px;font-size:14px;font-family:inherit;"></textarea>
         <button class="btn btn-primary btn-sm" style="margin-top:8px;width:100%;" onclick="App.importArticle()">拆解句子</button>
@@ -725,6 +746,153 @@ const App = {
     document.getElementById('import-text').value='';document.getElementById('import-sentences').innerHTML='';
     const ignored=results.filter(r=>r.duplicate||r.failed).length+skipped;
     this.toast(ignored?`已导入${count}句，跳过${ignored}句`:`已导入${count}句`);this.showLevelMap();
+  },
+
+  // ── Vision Import ──
+  async handleVisionFile(file){
+    if(!file||this.visionBusy)return;
+    const allowed=['image/jpeg','image/png','image/webp'];
+    if(!allowed.includes(file.type))return this.toast('仅支持 JPG、PNG 或 WebP 图片');
+    if(file.size>25*1024*1024)return this.toast('原图过大，请先裁剪后再试');
+    this.visionResults=[];this.visionPreviewUrl='';this.visionBusy=true;
+    this.renderVisionStatus('正在压缩图片…');
+    try{
+      const compressed=await this.compressVisionImage(file);
+      this.visionPreviewUrl=compressed.dataUrl;
+      this.renderVisionStatus(`已压缩至 ${Math.max(1,Math.round(compressed.size/1024))} KB，正在识别英文…`,false,true);
+      const controller=new AbortController();
+      const timer=setTimeout(()=>controller.abort(),45000);
+      let response;
+      try{
+        response=await fetch('/api/vision',{
+          method:'POST',headers:{'Content-Type':'application/json'},
+          body:JSON.stringify({image:compressed.dataUrl}),signal:controller.signal
+        });
+      }finally{clearTimeout(timer);}
+      const payload=await response.json().catch(()=>({}));
+      if(!response.ok)throw new Error(payload.code||`HTTP_${response.status}`);
+      const sentences=Array.isArray(payload.sentences)?payload.sentences:[];
+      if(!sentences.length)throw new Error('NO_ENGLISH');
+      this.visionResults=sentences.map(en=>({en:String(en),checked:true,error:''}));
+      this.visionBusy=false;
+      this.renderVisionResults();
+    }catch(error){
+      const code=error?.name==='AbortError'?'TIMEOUT':error?.message;
+      this.renderVisionStatus(this.visionErrorMessage(code),true,!!this.visionPreviewUrl);
+    }finally{this.visionBusy=false;}
+  },
+
+  async compressVisionImage(file){
+    let source=null,cleanup=()=>{};
+    try{
+      if(window.createImageBitmap){
+        try{source=await createImageBitmap(file,{imageOrientation:'from-image'});cleanup=()=>source.close?.();}catch(e){}
+      }
+      if(!source){
+        const url=URL.createObjectURL(file);
+        source=await new Promise((resolve,reject)=>{const img=new Image();img.onload=()=>resolve(img);img.onerror=()=>reject(new Error('BAD_IMAGE'));img.src=url;});
+        cleanup=()=>URL.revokeObjectURL(url);
+      }
+      const originalWidth=source.width||source.naturalWidth;
+      const originalHeight=source.height||source.naturalHeight;
+      if(!originalWidth||!originalHeight)throw new Error('BAD_IMAGE');
+      let maxEdge=1800,quality=.84,blob=null;
+      for(let attempt=0;attempt<4;attempt++){
+        const scale=Math.min(1,maxEdge/Math.max(originalWidth,originalHeight));
+        const width=Math.max(1,Math.round(originalWidth*scale));
+        const height=Math.max(1,Math.round(originalHeight*scale));
+        const canvas=document.createElement('canvas');canvas.width=width;canvas.height=height;
+        const ctx=canvas.getContext('2d',{alpha:false});
+        if(!ctx)throw new Error('BAD_IMAGE');
+        ctx.fillStyle='#fff';ctx.fillRect(0,0,width,height);ctx.drawImage(source,0,0,width,height);
+        blob=await new Promise(resolve=>canvas.toBlob(resolve,'image/jpeg',quality));
+        canvas.width=canvas.height=1;
+        if(blob&&blob.size<=4*1024*1024)break;
+        maxEdge=Math.round(maxEdge*.78);quality=Math.max(.62,quality-.08);
+      }
+      if(!blob||blob.size>4*1024*1024)throw new Error('TOO_LARGE');
+      const dataUrl=await new Promise((resolve,reject)=>{const reader=new FileReader();reader.onload=()=>resolve(reader.result);reader.onerror=()=>reject(new Error('BAD_IMAGE'));reader.readAsDataURL(blob);});
+      return {dataUrl,size:blob.size};
+    }finally{cleanup();}
+  },
+
+  renderVisionStatus(message,isError=false,showPreview=false){
+    const area=document.getElementById('vision-area');if(!area)return;
+    area.style.display='block';
+    area.innerHTML=`${showPreview&&this.visionPreviewUrl?`<img class="vision-preview" src="${this.visionPreviewUrl}" alt="本次待识别图片">`:''}<div class="vision-status ${isError?'error':''}">${this.esc(message)}</div>${isError?'<button class="btn btn-outline btn-sm" style="margin-top:8px;width:100%;" onclick="App.clearVisionImport()">关闭</button>':''}`;
+  },
+
+  renderVisionResults(progress=''){
+    const area=document.getElementById('vision-area');if(!area)return;
+    area.style.display='block';
+    const rows=this.visionResults.map((r,i)=>`
+      <div class="vision-result">
+        <input type="checkbox" ${r.checked?'checked':''} ${this.visionBusy?'disabled':''} aria-label="选择第${i+1}条" onchange="App.visionResults[${i}].checked=this.checked">
+        <div style="flex:1;min-width:0;">
+          <textarea ${this.visionBusy?'disabled':''} aria-label="第${i+1}条英文" oninput="App.visionResults[${i}].en=this.value">${this.esc(r.en)}</textarea>
+          ${r.error?`<div style="font-size:12px;color:var(--danger);margin-top:3px;">${this.esc(r.error)}</div>`:''}
+        </div>
+        <button class="btn btn-outline btn-sm vision-delete" ${this.visionBusy?'disabled':''} onclick="App.deleteVisionResult(${i})" aria-label="删除第${i+1}条">删除</button>
+      </div>`).join('');
+    area.innerHTML=`${this.visionPreviewUrl?`<img class="vision-preview" src="${this.visionPreviewUrl}" alt="本次识别图片">`:''}<div class="vision-status">请逐句核对，可直接修改、取消勾选或删除。AI 可能漏字或补写。</div>${progress?`<div class="vision-status">${this.esc(progress)}</div>`:''}<div>${rows||'<div class="vision-status">没有剩余结果</div>'}</div><div class="btn-group" style="margin-top:10px;"><button class="btn btn-primary btn-sm" ${this.visionBusy||!this.visionResults.length?'disabled':''} onclick="App.saveVisionImported()">翻译并保存勾选句子</button><button class="btn btn-outline btn-sm" ${this.visionBusy?'disabled':''} onclick="App.clearVisionImport()">取消</button></div>`;
+  },
+
+  deleteVisionResult(index){
+    if(this.visionBusy)return;
+    this.visionResults.splice(index,1);this.renderVisionResults();
+  },
+
+  clearVisionImport(){
+    if(this.visionBusy)return;
+    this.visionResults=[];this.visionPreviewUrl='';
+    const area=document.getElementById('vision-area');if(area){area.innerHTML='';area.style.display='none';}
+  },
+
+  visionErrorMessage(code){
+    const messages={
+      BAD_IMAGE:'无法读取这张图片，请换一张再试。',TOO_LARGE:'压缩后图片仍然过大，请先裁剪后再试。',
+      NO_ENGLISH:'图片中没有识别到可用英文。',TIMEOUT:'识别超时，请检查网络后重试。',
+      RATE_LIMITED:'操作太频繁，请稍后再试。',AI_QUOTA:'Workers AI 免费额度可能已用完，请明天再试。',
+      AI_NOT_CONFIGURED:'Cloudflare 尚未配置 AI binding。',MODEL_FORMAT:'模型返回格式异常，请换图重试。',
+      INVALID_IMAGE:'图片格式或内容无效。',IMAGE_TOO_LARGE:'图片过大，请先裁剪后再试。'
+    };
+    return messages[code]||'识别失败，请检查网络后稍后重试。';
+  },
+
+  async saveVisionImported(){
+    if(this.visionBusy)return;
+    if(!this.visionResults.some(r=>r.checked))return this.toast('请至少勾选一句');
+    this.visionBusy=true;this.renderVisionResults('正在准备翻译…');
+    const existing=await this.dbGetAll('sentences');
+    const existingKeys=new Set(existing.map(s=>this.sentenceKey(s.en)));const batchKeys=new Set();
+    let saved=0,skipped=0,failed=0,position=0;
+    const selectedCount=this.visionResults.filter(r=>r.checked).length;
+    for(const result of this.visionResults){
+      if(!result.checked)continue;
+      position++;result.error='';result.en=String(result.en).replace(/\s+/g,' ').trim();
+      if(!/[a-zA-Z]/.test(result.en)){result.error='请保留有效英文内容';failed++;continue;}
+      const key=this.sentenceKey(result.en);
+      if(!key||existingKeys.has(key)||batchKeys.has(key)){result.done=true;skipped++;continue;}
+      batchKeys.add(key);this.renderVisionResults(`正在翻译 ${position}/${selectedCount}…`);
+      let zh='';
+      try{
+        const response=await Promise.race([fetch(`https://translate.googleapis.com/translate_a/single?client=gtx&sl=en&tl=zh-CN&dt=t&q=${encodeURIComponent(result.en)}`,{referrerPolicy:'strict-origin-when-cross-origin'}),new Promise((_,reject)=>setTimeout(()=>reject(new Error('timeout')),7000))]);
+        if(response.ok){const data=await response.json();zh=(data[0]||[]).map(item=>item[0]).join('');}
+      }catch(e){}
+      if(!zh){result.error='翻译失败，未保存；可稍后重试';failed++;continue;}
+      const id=await this.dbPut('sentences',{en:result.en,zh,level:0,module:'custom',archived:false,mastered:false,reviewCount:0,nextReviewDate:this.todayStr,reviewInterval:0,lastReviewed:null});
+      if(id===null){result.error='本地保存失败，请检查浏览器存储空间';failed++;continue;}
+      existingKeys.add(key);result.done=true;saved++;
+    }
+    this.visionResults=this.visionResults.filter(r=>!r.done);this.visionBusy=false;
+    const summary=failed?`已保存${saved}句，${failed}句未保存${skipped?`，跳过${skipped}句`:''}`:skipped?`已保存${saved}句，跳过${skipped}句`:`已保存${saved}句`;
+    this.toast(summary);
+    if(!this.visionResults.length){this.visionPreviewUrl='';await this.showLevelMap();}
+    else{
+      this.renderVisionResults();
+      const customCount=(await this.dbGetAll('sentences')).filter(s=>s.level===0&&!s.archived).length;
+      const countEl=document.getElementById('custom-count');if(countEl)countEl.textContent=customCount>0?`当前共${customCount}句`:'当前暂无句子';
+    }
   },
 
   renderLearnCard(){
