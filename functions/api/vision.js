@@ -61,6 +61,13 @@ function extractJson(text) {
   try { return JSON.parse(cleaned.slice(start, end + 1)); } catch { return null; }
 }
 
+function saysNoEnglish(text) {
+  const answer = String(text || '').replace(/\s+/g, ' ').trim();
+  return /\bno (?:readable |visible )?(?:english )?text\b/i.test(answer)
+    || /\bno (?:readable |visible )?english\b/i.test(answer)
+    || /\bdoes(?: not|n't) contain (?:any )?(?:readable |visible )?english\b/i.test(answer);
+}
+
 function validateSentences(value) {
   if (!Array.isArray(value)) return null;
   const output = [];
@@ -116,8 +123,9 @@ If no readable English is visible, return {"sentences":[]}. Return at most ${MAX
     return json({ code: quota ? 'AI_QUOTA' : 'AI_FAILED' }, quota ? 429 : 502);
   }
 
-  const parsed = extractJson(modelResponse?.answer);
-  const sentences = validateSentences(parsed?.sentences);
+  const answer = modelResponse?.answer;
+  const parsed = extractJson(answer);
+  const sentences = parsed ? validateSentences(parsed.sentences) : saysNoEnglish(answer) ? [] : null;
   if (!sentences) return json({ code: 'MODEL_FORMAT' }, 502);
   if (!sentences.length) return json({ code: 'NO_ENGLISH' }, 422);
   return json({ sentences, model: MODEL });
