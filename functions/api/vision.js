@@ -14,6 +14,7 @@ function json(body, status = 200) {
       'Cache-Control': 'no-store',
       'X-Content-Type-Options': 'nosniff',
       'Referrer-Policy': 'no-referrer',
+      'X-Cat-English-Vision': '3',
     },
   });
 }
@@ -90,6 +91,13 @@ function parseTranscription(text) {
   return validateSentences(entries);
 }
 
+function modelText(response) {
+  if (typeof response === 'string') return response;
+  const direct = [response?.answer, response?.response, response?.text, response?.description];
+  const nested = [response?.result?.answer, response?.result?.response, response?.result?.text, response?.result?.description];
+  return [...direct, ...nested].find(value => typeof value === 'string') || '';
+}
+
 function validateSentences(value) {
   if (!Array.isArray(value)) return null;
   const output = [];
@@ -145,7 +153,7 @@ If no readable English is visible, return exactly NO_ENGLISH. Return at most ${M
     return json({ code: quota ? 'AI_QUOTA' : 'AI_FAILED' }, quota ? 429 : 502);
   }
 
-  const sentences = parseTranscription(modelResponse?.answer);
+  const sentences = parseTranscription(modelText(modelResponse));
   if (!sentences) return json({ code: 'MODEL_FORMAT' }, 502);
   if (!sentences.length) return json({ code: 'NO_ENGLISH' }, 422);
   return json({ sentences, model: MODEL });
