@@ -63,9 +63,31 @@ function extractJson(text) {
 
 function saysNoEnglish(text) {
   const answer = String(text || '').replace(/\s+/g, ' ').trim();
-  return /\bno (?:readable |visible )?(?:english )?text\b/i.test(answer)
+  return /^NO_ENGLISH$/i.test(answer)
+    || /\bno (?:readable |visible )?(?:english )?text\b/i.test(answer)
     || /\bno (?:readable |visible )?english\b/i.test(answer)
     || /\bdoes(?: not|n't) contain (?:any )?(?:readable |visible )?english\b/i.test(answer);
+}
+
+function parseTranscription(text) {
+  const answer = String(text || '').trim();
+  if (!answer) return null;
+  const parsed = extractJson(answer);
+  if (parsed) return validateSentences(parsed.sentences);
+  if (saysNoEnglish(answer)) return [];
+
+  const cleaned = answer.replace(/^```(?:text)?\s*/i, '').replace(/\s*```$/, '').trim();
+  const lines = cleaned.split(/\r?\n/).map(line => line
+    .replace(/^\s*(?:[-*•]+|\d+[.)])\s*/, '')
+    .replace(/^(?:the (?:visible )?(?:english )?text (?:reads|is)|transcription|english text)\s*:\s*/i, '')
+    .replace(/^["'`]+|["'`]+$/g, '')
+    .trim())
+    .filter(line => line && !/^(?:here (?:is|are)|transcription|english text)\s*:?$/i.test(line));
+  const entries = lines.flatMap(line => {
+    const parts = (line.match(/[^.!?]+[.!?]+|[^.!?]+$/g) || []).map(part => part.trim()).filter(Boolean);
+    return parts.length > 1 ? parts : [line];
+  });
+  return validateSentences(entries);
 }
 
 function validateSentences(value) {
@@ -107,9 +129,9 @@ export async function onRequest(context) {
 
   const question = `Transcribe only the English text that is visibly present in this image.
 Do not describe the image, translate, correct, complete, infer, or invent text.
-Preserve punctuation and reading order. Split normal prose into sentences. Keep menu items or headings as separate entries when they contain useful English.
-Return only valid JSON in exactly this shape: {"sentences":["First visible English sentence.","Second visible English text."]}
-If no readable English is visible, return {"sentences":[]}. Return at most ${MAX_SENTENCES} entries.`;
+Preserve punctuation and reading order. Put each sentence, menu item, or useful English heading on its own line.
+Return transcription lines only: no JSON, bullets, numbering, headings, explanations, or translations.
+If no readable English is visible, return exactly NO_ENGLISH. Return at most ${MAX_SENTENCES} lines.`;
 
   let modelResponse;
   try {
@@ -123,9 +145,7 @@ If no readable English is visible, return {"sentences":[]}. Return at most ${MAX
     return json({ code: quota ? 'AI_QUOTA' : 'AI_FAILED' }, quota ? 429 : 502);
   }
 
-  const answer = modelResponse?.answer;
-  const parsed = extractJson(answer);
-  const sentences = parsed ? validateSentences(parsed.sentences) : saysNoEnglish(answer) ? [] : null;
+  const sentences = parseTranscription(modelResponse?.answer);
   if (!sentences) return json({ code: 'MODEL_FORMAT' }, 502);
   if (!sentences.length) return json({ code: 'NO_ENGLISH' }, 422);
   return json({ sentences, model: MODEL });
